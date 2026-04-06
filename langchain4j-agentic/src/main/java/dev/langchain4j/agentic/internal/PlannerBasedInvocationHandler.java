@@ -54,8 +54,13 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class PlannerBasedInvocationHandler implements InvocationHandler, InternalAgent {
+
+    private static final Logger LOG = LoggerFactory.getLogger(PlannerBasedInvocationHandler.class);
+
     private final Executor executor;
 
     private final Function<AgenticScope, Object> output;
@@ -374,18 +379,26 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
             } finally {
                 lock.writeLock().unlock();
             }
+            boolean nullLogged = false;
             while (true) {
                 List<AgentExecutor> agents;
                 lock.writeLock().lock();
                 try {
                     if (nextAction == null) {
                         Thread.yield();
+                        if (!nullLogged) {
+                            LOG.trace("Next action is null, yielding thread");
+                            nullLogged = true;
+                        }
                         continue;
                     }
+                    nullLogged = false;
                     if (nextAction.isDone()) {
+                        LOG.trace("Action is done, terminating loop");
                         break;
                     }
                     agents = ((Action.AgentCallAction) nextAction).agentsToCall();
+                    LOG.trace("Executing action with {} agents", agents.size());
                     nextAction = null;
                 } finally {
                     lock.writeLock().unlock();
@@ -413,15 +426,18 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
                     .map(agentExecutor ->
                             CompletableFuture.supplyAsync(() -> agentExecutor.execute(agenticScope, this), exec))
                     .toList();
-            try {
-                for (Future<?> future : tasks) {
-                    future.get();
+            if (planner.topology() != AgenticSystemTopology.STAR) { // fix
+                try {
+                    for (Future<?> future : tasks) {
+                        future.get();
+                    }
+                    LOG.debug("Finished parallel execution with {} agents", agents.size());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(e);
+                } catch (ExecutionException e) {
+                    throw new RuntimeException(e);
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException(e);
-            } catch (ExecutionException e) {
-                throw new RuntimeException(e);
             }
         }
 
